@@ -33,7 +33,7 @@ class CouponService:
     async def issue_coupon(self, request: IssueCouponRequest) -> CouponInfo:
         idempotent_key = self._build_idempotent_key(request)
         if idempotent_key:
-            idempotent_result = await self._check_idempotent(idempotent_key)
+            idempotent_result = await self._check_idempotent(idempotent_key, request)
             if idempotent_result:
                 return idempotent_result
 
@@ -101,45 +101,88 @@ class CouponService:
 
         await self.db.commit()
 
-    async def _check_idempotent(self, request_id: str) -> CouponInfo | None:
-        if not self.redis:
-            return None
+    async def _check_idempotent(self, idempotent_key: str, request: IssueCouponRequest) -> CouponInfo | None:
+        if self.redis:
+            cache_key = f"{idempotent_key}"
+            cached = await self.redis.hgetall(cache_key)
+            if cached:
+                try:
+                    return CouponInfo(
+                        record_id=cached["record_id"],
+                        coupon_code=cached["coupon_code"],
+                        package_id=cached["package_id"],
+                        package_name=cached["package_name"],
+                        display_text=cached["display_text"],
+                        valid_start_time=datetime.fromisoformat(cached["valid_start_time"]),
+                        valid_end_time=datetime.fromisoformat(cached["valid_end_time"]),
+                        applicable_comics=cached["applicable_comics"].split(",") if cached.get("applicable_comics") else [],
+                    )
+                except (KeyError, ValueError):
+                    pass
 
-        cache_key = f"coupon:idempotent:{request_id}"
-        cached = await self.redis.hgetall(cache_key)
-        if cached:
-            try:
-                return CouponInfo(
-                    record_id=cached["record_id"],
-                    coupon_code=cached["coupon_code"],
-                    package_id=cached["package_id"],
-                    package_name=cached["package_name"],
-                    display_text=cached["display_text"],
-                    valid_start_time=datetime.fromisoformat(cached["valid_start_time"]),
-                    valid_end_time=datetime.fromisoformat(cached["valid_end_time"]),
-                    applicable_comics=cached["applicable_comics"].split(",") if cached.get("applicable_comics") else [],
-                )
-            except (KeyError, ValueError):
-                return None
+        db_result = await self._check_idempotent_from_db(request)
+        if db_result:
+            if self.redis:
+                await self._cache_idempotent_result(idempotent_key, db_result)
+            return db_result
+
         return None
 
-    async def _cache_idempotent_result(self, request_id: str, user_coupon: UserCoupon) -> None:
+    async def _check_idempotent_from_db(self, request: IssueCouponRequest) -> CouponInfo | None:
+        stmt = select(UserCoupon)
+        if request.partner_id and request.biz_serial_no:
+            stmt = stmt.where(
+                and_(
+                    UserCoupon.partner_id == request.partner_id,
+                    UserCoupon.biz_serial_no == request.biz_serial_no,
+                )
+            )
+        elif request.request_id:
+            stmt = stmt.where(UserCoupon.record_id == request.request_id)
+        else:
+            return None
+
+        result = await self.db.execute(stmt.limit(1))
+        user_coupon = result.scalar_one_or_none()
+        if not user_coupon:
+            return None
+
+        package_stmt = select(CouponPackage).where(
+            CouponPackage.package_id == user_coupon.package_id
+        )
+        package_result = await self.db.execute(package_stmt)
+        coupon_package = package_result.scalar_one_or_none()
+
+        return self._build_coupon_info(user_coupon, coupon_package or user_coupon)
+
+    async def _cache_idempotent_result(self, idempotent_key: str, user_coupon: UserCoupon | CouponInfo) -> None:
         if not self.redis:
             return
 
-        cache_key = f"coupon:idempotent:{request_id}"
-        data = {
-            "record_id": user_coupon.record_id,
-            "coupon_code": user_coupon.coupon_code,
-            "package_id": user_coupon.package_id,
-            "package_name": user_coupon.display_text,
-            "display_text": user_coupon.display_text,
-            "valid_start_time": user_coupon.valid_start_time.isoformat(),
-            "valid_end_time": user_coupon.valid_end_time.isoformat(),
-            "applicable_comics": user_coupon.applicable_comics,
-        }
-        await self.redis.hset(cache_key, mapping=data)
-        await self.redis.expire(cache_key, 86400 * 7)
+        if isinstance(user_coupon, CouponInfo):
+            data = {
+                "record_id": user_coupon.record_id,
+                "coupon_code": user_coupon.coupon_code,
+                "package_id": user_coupon.package_id,
+                "package_name": user_coupon.package_name,
+                "display_text": user_coupon.display_text,
+                "valid_start_time": user_coupon.valid_start_time.isoformat(),
+                "valid_end_time": user_coupon.valid_end_time.isoformat(),
+                "applicable_comics": ",".join(user_coupon.applicable_comics) if user_coupon.applicable_comics else "",
+            }
+        else:
+            data = {
+                "record_id": user_coupon.record_id,
+                "coupon_code": user_coupon.coupon_code,
+                "package_id": user_coupon.package_id,
+                "package_name": user_coupon.display_text,
+                "display_text": user_coupon.display_text,
+                "valid_start_time": user_coupon.valid_start_time.isoformat(),
+                "valid_end_time": user_coupon.valid_end_time.isoformat(),
+                "applicable_comics": user_coupon.applicable_comics,
+            }
+        await self.redis.hset(idempotent_key, mapping=data)
+        await self.redis.expire(idempotent_key, 86400 * 30)
 
     async def _get_and_lock_sku(self, package_id: str) -> CouponPackageSku | None:
         stmt = (

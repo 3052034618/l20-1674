@@ -20,6 +20,10 @@ from app.schemas.admin import (
     ImportCouponCodesResponse,
     PackageListResponse,
     PackageStatsResponse,
+    StockReconcileResponse,
+    StockRecalculateResponse,
+    UpdateActivityStatusRequest,
+    UpdateActivityStatusResponse,
 )
 from app.services.admin_service import AdminService
 
@@ -311,6 +315,117 @@ async def get_behavior_stats(
     except Exception as e:
         logger.exception(f"Unexpected error in get_behavior_stats: {str(e)}")
         return BehaviorStatsResponse(
+            success=False,
+            code=500,
+            message=str(e),
+            user_message=ERROR_MESSAGES["system_error"],
+            data=None,
+        )
+
+
+@router.put("/activities/status", response_model=UpdateActivityStatusResponse, summary="更新活动状态")
+async def update_activity_status(
+    request: UpdateActivityStatusRequest,
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+) -> UpdateActivityStatusResponse:
+    try:
+        service = AdminService(db, redis_client)
+        result = await service.update_activity_status(request)
+        action_labels = {"online": "上线", "pause": "暂停", "resume": "恢复", "end": "结束"}
+        return UpdateActivityStatusResponse(
+            success=True,
+            code=200,
+            message=f"活动{action_labels.get(request.action, request.action)}成功",
+            user_message=f"活动{action_labels.get(request.action, request.action)}成功",
+            data=result,
+        )
+    except CouponException as e:
+        logger.warning(f"Update activity status failed: {e.message}, activity_id={request.activity_id}")
+        return UpdateActivityStatusResponse(
+            success=False,
+            code=e.code,
+            message=e.message,
+            user_message=e.user_message,
+            data=None,
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in update_activity_status: {str(e)}")
+        return UpdateActivityStatusResponse(
+            success=False,
+            code=500,
+            message=str(e),
+            user_message=ERROR_MESSAGES["system_error"],
+            data=None,
+        )
+
+
+@router.get("/stock/reconcile", response_model=StockReconcileResponse, summary="库存对账")
+async def stock_reconcile(
+    activity_id: str = Query(..., description="活动编号"),
+    package_type: str | None = Query(None, description="券包类型，可选"),
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+) -> StockReconcileResponse:
+    try:
+        service = AdminService(db, redis_client)
+        result = await service.get_stock_reconcile(activity_id, package_type)
+        return StockReconcileResponse(
+            success=True,
+            code=200,
+            message="查询成功",
+            user_message="",
+            data=result,
+        )
+    except CouponException as e:
+        logger.warning(f"Stock reconcile failed: {e.message}, activity_id={activity_id}")
+        return StockReconcileResponse(
+            success=False,
+            code=e.code,
+            message=e.message,
+            user_message=e.user_message,
+            data=None,
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in stock_reconcile: {str(e)}")
+        return StockReconcileResponse(
+            success=False,
+            code=500,
+            message=str(e),
+            user_message=ERROR_MESSAGES["system_error"],
+            data=None,
+        )
+
+
+@router.post("/stock/recalculate", response_model=StockRecalculateResponse, summary="重新计算库存")
+async def stock_recalculate(
+    activity_id: str = Query(..., description="活动编号"),
+    package_type: str | None = Query(None, description="券包类型，可选"),
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+) -> StockRecalculateResponse:
+    try:
+        service = AdminService(db, redis_client)
+        result = await service.recalculate_stock(activity_id, package_type)
+        return StockRecalculateResponse(
+            success=True,
+            code=200,
+            message="库存重算完成",
+            user_message="库存重算完成",
+            data=result,
+        )
+    except CouponException as e:
+        logger.warning(f"Stock recalculate failed: {e.message}, activity_id={activity_id}")
+        return StockRecalculateResponse(
+            success=False,
+            code=e.code,
+            message=e.message,
+            user_message=e.user_message,
+            data=None,
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in stock_recalculate: {str(e)}")
+        return StockRecalculateResponse(
             success=False,
             code=500,
             message=str(e),

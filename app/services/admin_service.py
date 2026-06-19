@@ -3,10 +3,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import redis.asyncio as redis
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import CouponActivityError, CouponException, CouponStatus
+from app.core import ActivityStatus, CouponActivityError, CouponException, CouponStatus
 from app.models import Activity, CouponPackage, CouponPackageSku, UserBehaviorLog, UserCoupon
 from app.schemas.admin import (
     BehaviorStatsRequest,
@@ -14,6 +14,7 @@ from app.schemas.admin import (
     CreateCouponPackageRequest,
     GenerateCouponCodesRequest,
     ImportCouponCodesRequest,
+    UpdateActivityStatusRequest,
 )
 
 
@@ -319,6 +320,180 @@ class AdminService:
 
         return result_list
 
+    async def update_activity_status(self, request: UpdateActivityStatusRequest) -> dict[str, Any]:
+        activity_result = await self.db.execute(
+            select(Activity).where(Activity.activity_id == request.activity_id)
+        )
+        activity = activity_result.scalar_one_or_none()
+        if not activity:
+            raise CouponActivityError(
+                message=f"Activity {request.activity_id} not found",
+                error_key="activity_not_found",
+            )
+
+        action_status_map = {
+            "online": (ActivityStatus.ONGOING, [ActivityStatus.DRAFT, ActivityStatus.PAUSED]),
+            "pause": (ActivityStatus.PAUSED, [ActivityStatus.ONGOING]),
+            "resume": (ActivityStatus.ONGOING, [ActivityStatus.PAUSED]),
+            "end": (ActivityStatus.ENDED, [ActivityStatus.ONGOING, ActivityStatus.PAUSED, ActivityStatus.DRAFT]),
+        }
+
+        target_status, allowed_from = action_status_map[request.action]
+        if activity.status not in [s.value for s in allowed_from]:
+            current_label = {0: "草稿", 1: "进行中", 2: "暂停", 3: "已结束"}.get(activity.status, "未知")
+            raise CouponActivityError(
+                message=f"Cannot {request.action} activity in status {current_label}",
+                error_key="invalid_status_transition",
+            )
+
+        activity.status = target_status.value
+        await self.db.commit()
+        await self.db.refresh(activity)
+
+        return {
+            "activity_id": activity.activity_id,
+            "name": activity.name,
+            "status": activity.status,
+            "status_label": {0: "草稿", 1: "进行中", 2: "暂停", 3: "已结束"}.get(activity.status, "未知"),
+            "start_time": activity.start_time.isoformat(),
+            "end_time": activity.end_time.isoformat(),
+        }
+
+    async def get_stock_reconcile(self, activity_id: str, package_type: str | None = None) -> dict[str, Any]:
+        activity_result = await self.db.execute(
+            select(Activity).where(Activity.activity_id == activity_id)
+        )
+        if not activity_result.scalar_one_or_none():
+            raise CouponActivityError(
+                message=f"Activity {activity_id} not found",
+                error_key="activity_not_found",
+            )
+
+        pkg_stmt = select(CouponPackage).where(CouponPackage.activity_id == activity_id)
+        if package_type:
+            pkg_stmt = pkg_stmt.where(CouponPackage.type == package_type)
+        pkg_result = await self.db.execute(pkg_stmt)
+        packages = pkg_result.scalars().all()
+
+        reconcile_list = []
+        for pkg in packages:
+            sku_total = (await self.db.execute(
+                select(func.count()).select_from(CouponPackageSku).where(
+                    CouponPackageSku.package_id == pkg.package_id
+                )
+            )).scalar() or 0
+
+            sku_available = (await self.db.execute(
+                select(func.count()).select_from(CouponPackageSku).where(
+                    and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status == 0)
+                )
+            )).scalar() or 0
+
+            sku_claimed = (await self.db.execute(
+                select(func.count()).select_from(CouponPackageSku).where(
+                    and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status == 1)
+                )
+            )).scalar() or 0
+
+            sku_used = (await self.db.execute(
+                select(func.count()).select_from(CouponPackageSku).where(
+                    and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status == 2)
+                )
+            )).scalar() or 0
+
+            sku_expired = (await self.db.execute(
+                select(func.count()).select_from(CouponPackageSku).where(
+                    and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status == 3)
+                )
+            )).scalar() or 0
+
+            config_vs_sku_diff = pkg.total_quantity - sku_total
+            claimed_vs_sku_claimed_diff = pkg.claimed_quantity - sku_claimed
+
+            reconcile_list.append({
+                "package_id": pkg.package_id,
+                "package_name": pkg.name,
+                "package_type": pkg.type,
+                "config_quantity": pkg.total_quantity,
+                "sku_total": sku_total,
+                "config_vs_sku_diff": config_vs_sku_diff,
+                "available": sku_available,
+                "sku_claimed": sku_claimed,
+                "claimed_quantity": pkg.claimed_quantity,
+                "claimed_vs_sku_claimed_diff": claimed_vs_sku_claimed_diff,
+                "sku_used": sku_used,
+                "sku_expired": sku_expired,
+                "has_discrepancy": config_vs_sku_diff != 0 or claimed_vs_sku_claimed_diff != 0,
+            })
+
+        return {
+            "activity_id": activity_id,
+            "packages": reconcile_list,
+        }
+
+    async def recalculate_stock(self, activity_id: str, package_type: str | None = None) -> dict[str, Any]:
+        activity_result = await self.db.execute(
+            select(Activity).where(Activity.activity_id == activity_id)
+        )
+        if not activity_result.scalar_one_or_none():
+            raise CouponActivityError(
+                message=f"Activity {activity_id} not found",
+                error_key="activity_not_found",
+            )
+
+        pkg_stmt = select(CouponPackage).where(CouponPackage.activity_id == activity_id)
+        if package_type:
+            pkg_stmt = pkg_stmt.where(CouponPackage.type == package_type)
+        pkg_result = await self.db.execute(pkg_stmt)
+        packages = pkg_result.scalars().all()
+
+        fixed_list = []
+        for pkg in packages:
+            sku_total = (await self.db.execute(
+                select(func.count()).select_from(CouponPackageSku).where(
+                    CouponPackageSku.package_id == pkg.package_id
+                )
+            )).scalar() or 0
+
+            sku_claimed = (await self.db.execute(
+                select(func.count()).select_from(CouponPackageSku).where(
+                    and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status == 1)
+                )
+            )).scalar() or 0
+
+            old_total = pkg.total_quantity
+            old_claimed = pkg.claimed_quantity
+
+            await self.db.execute(
+                update(CouponPackage)
+                .where(CouponPackage.id == pkg.id)
+                .values(total_quantity=sku_total, claimed_quantity=sku_claimed)
+            )
+
+            if self.redis:
+                stock_key = f"coupon:stock:{pkg.package_id}"
+                sku_available = (await self.db.execute(
+                    select(func.count()).select_from(CouponPackageSku).where(
+                        and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status == 0)
+                    )
+                )).scalar() or 0
+                await self.redis.setex(stock_key, 300, str(sku_available))
+
+            fixed_list.append({
+                "package_id": pkg.package_id,
+                "package_name": pkg.name,
+                "total_quantity": {"before": old_total, "after": sku_total},
+                "claimed_quantity": {"before": old_claimed, "after": sku_claimed},
+                "was_correct": old_total == sku_total and old_claimed == sku_claimed,
+            })
+
+        await self.db.commit()
+
+        return {
+            "activity_id": activity_id,
+            "recalculated_packages": fixed_list,
+        }
+
     async def get_behavior_stats(self, request: BehaviorStatsRequest) -> dict[str, Any]:
         activity = await self.db.execute(
             select(Activity).where(Activity.activity_id == request.activity_id)
@@ -391,11 +566,59 @@ class AdminService:
 
         by_scene = []
         for trigger_scene, counts in scene_data.items():
+            claim_count = counts["click"]
+            use_count = counts["use"]
+            impression_count = counts["impression"]
+            claim_rate = round(claim_count / impression_count * 100, 2) if impression_count > 0 else 0.0
+            use_rate = round(use_count / claim_count * 100, 2) if claim_count > 0 else 0.0
             by_scene.append({
                 "trigger_scene": trigger_scene,
-                "impression_count": counts["impression"],
-                "click_count": counts["click"],
-                "use_count": counts["use"],
+                "impression_count": impression_count,
+                "click_count": claim_count,
+                "use_count": use_count,
+                "claim_rate": claim_rate,
+                "use_rate": use_rate,
+            })
+
+        total_impression = total_counts["impression"]
+        total_click = total_counts["click"]
+        total_use = total_counts["use"]
+        total_claim_rate = round(total_click / total_impression * 100, 2) if total_impression > 0 else 0.0
+        total_use_rate = round(total_use / total_click * 100, 2) if total_click > 0 else 0.0
+
+        daily_stmt = select(
+            func.date(UserBehaviorLog.created_at).label("log_date"),
+            UserBehaviorLog.behavior_type,
+            func.count(UserBehaviorLog.log_id)
+        ).where(and_(*conditions)).group_by(
+            func.date(UserBehaviorLog.created_at),
+            UserBehaviorLog.behavior_type
+        )
+        daily_result = await self.db.execute(daily_stmt)
+        daily_data: dict[str, dict[str, int]] = {}
+        for row in daily_result.all():
+            log_date, behavior_type, count = row
+            date_str = str(log_date)
+            if date_str not in daily_data:
+                daily_data[date_str] = {"impression": 0, "click": 0, "use": 0}
+            if behavior_type in daily_data[date_str]:
+                daily_data[date_str][behavior_type] = count
+
+        daily_trend = []
+        for date_str in sorted(daily_data.keys()):
+            d = daily_data[date_str]
+            d_impression = d["impression"]
+            d_click = d["click"]
+            d_use = d["use"]
+            d_claim_rate = round(d_click / d_impression * 100, 2) if d_impression > 0 else 0.0
+            d_use_rate = round(d_use / d_click * 100, 2) if d_click > 0 else 0.0
+            daily_trend.append({
+                "date": date_str,
+                "impression": d_impression,
+                "click": d_click,
+                "use": d_use,
+                "claim_rate": d_claim_rate,
+                "use_rate": d_use_rate,
             })
 
         return {
@@ -403,8 +626,15 @@ class AdminService:
             "package_type": request.package_type.value if request.package_type else None,
             "start_time": request.start_time.isoformat() if request.start_time else None,
             "end_time": request.end_time.isoformat() if request.end_time else None,
-            "total": total_counts,
+            "total": {
+                "impression": total_impression,
+                "click": total_click,
+                "use": total_use,
+                "claim_rate": total_claim_rate,
+                "use_rate": total_use_rate,
+            },
             "by_scene": by_scene,
+            "daily_trend": daily_trend,
         }
 
     def _generate_single_code(self, prefix: str = "") -> str:

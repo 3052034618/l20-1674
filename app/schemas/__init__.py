@@ -12,6 +12,10 @@ from .admin import (
     ImportCouponCodesResponse,
     PackageListResponse,
     PackageStatsResponse,
+    StockReconcileResponse,
+    StockRecalculateResponse,
+    UpdateActivityStatusRequest,
+    UpdateActivityStatusResponse,
 )
 from .coupon import (
     CouponCallbackRequest,
@@ -44,4 +48,8 @@ __all__ = [
     "PackageListResponse",
     "BehaviorStatsRequest",
     "BehaviorStatsResponse",
+    "UpdateActivityStatusRequest",
+    "UpdateActivityStatusResponse",
+    "StockReconcileResponse",
+    "StockRecalculateResponse",
 ]

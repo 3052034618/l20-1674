@@ -175,3 +175,46 @@ class BehaviorStatsResponse(BaseModel):
     message: str = Field(..., description="消息")
     user_message: str = Field(..., description="给前端展示的消息")
     data: dict[str, Any] | None = Field(default=None, description="统计数据")
+
+
+class UpdateActivityStatusRequest(BaseModel):
+    activity_id: str = Field(..., description="活动编号", min_length=1, max_length=64)
+    action: str = Field(..., description="操作：online-上线 pause-暂停 resume-恢复 end-结束")
+
+    @field_validator("activity_id")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("不能为空字符串")
+        return v.strip()
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        if v not in ("online", "pause", "resume", "end"):
+            raise ValueError("action必须是online/pause/resume/end之一")
+        return v
+
+
+class UpdateActivityStatusResponse(BaseModel):
+    success: bool = Field(..., description="是否成功")
+    code: int = Field(..., description="状态码")
+    message: str = Field(..., description="消息")
+    user_message: str = Field(..., description="给前端展示的消息")
+    data: dict[str, Any] | None = Field(default=None, description="活动信息")
+
+
+class StockReconcileResponse(BaseModel):
+    success: bool = Field(..., description="是否成功")
+    code: int = Field(..., description="状态码")
+    message: str = Field(..., description="消息")
+    user_message: str = Field(..., description="给前端展示的消息")
+    data: dict[str, Any] | None = Field(default=None, description="对账数据")
+
+
+class StockRecalculateResponse(BaseModel):
+    success: bool = Field(..., description="是否成功")
+    code: int = Field(..., description="状态码")
+    message: str = Field(..., description="消息")
+    user_message: str = Field(..., description="给前端展示的消息")
+    data: dict[str, Any] | None = Field(default=None, description="重算结果")
