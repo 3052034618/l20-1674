@@ -369,7 +369,7 @@ async def test_stock_recalculate_issued_includes_used(
 async def test_partner_permission_check(
     db_session: AsyncSession,
 ) -> None:
-    from app.api.partner_auth import check_partner_permission, PartnerAuthError
+    from app.api.partner_auth import check_partner_permission, PartnerForbiddenError
 
     partner = Partner(
         partner_id=f"partner_perm_{uuid.uuid4().hex[:8]}",
@@ -385,10 +385,10 @@ async def test_partner_permission_check(
 
     await check_partner_permission(partner, "act_001", "new_reader", db_session)
 
-    with pytest.raises(PartnerAuthError):
+    with pytest.raises(PartnerForbiddenError):
         await check_partner_permission(partner, "act_999", "new_reader", db_session)
 
-    with pytest.raises(PartnerAuthError):
+    with pytest.raises(PartnerForbiddenError):
         await check_partner_permission(partner, "act_001", "vip_exclusive", db_session)
 
 
@@ -396,7 +396,7 @@ async def test_partner_permission_check(
 async def test_partner_daily_limit(
     db_session: AsyncSession,
 ) -> None:
-    from app.api.partner_auth import check_partner_daily_limit, PartnerAuthError
+    from app.api.partner_auth import check_partner_daily_limit, PartnerDailyLimitError
 
     partner = Partner(
         partner_id=f"partner_limit_{uuid.uuid4().hex[:8]}",
@@ -421,5 +421,5 @@ async def test_partner_daily_limit(
         db_session.add(log)
     await db_session.commit()
 
-    with pytest.raises(PartnerAuthError):
+    with pytest.raises(PartnerDailyLimitError):
         await check_partner_daily_limit(partner, db_session)

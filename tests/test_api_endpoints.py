@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.partner_auth import verify_partner_signature
 from app.core import (
     ActivityStatus,
     CouponType,
@@ -17,6 +18,7 @@ from app.models import (
     Activity,
     CouponPackage,
     CouponPackageSku,
+    Partner,
     User,
     UserCoupon,
 )
@@ -36,12 +38,29 @@ def create_mock_redis():
     mock_redis.hgetall = AsyncMock(return_value={})
     mock_redis.hset = AsyncMock()
     mock_redis.expire = AsyncMock()
+    mock_redis.delete = AsyncMock()
     return mock_redis
+
+
+def create_mock_partner():
+    partner = Partner(
+        partner_id="test_partner",
+        name="测试合作方",
+        sign_key="test_key",
+        allowed_activities="",
+        allowed_package_types="",
+        daily_limit=0,
+        status=1,
+    )
+    partner.id = 0
+    return partner
 
 
 def override_dependencies(db_session: AsyncSession, mock_redis: MagicMock | None = None):
     if mock_redis is None:
         mock_redis = create_mock_redis()
+
+    mock_partner = create_mock_partner()
 
     async def mock_get_redis():
         yield mock_redis
@@ -49,8 +68,12 @@ def override_dependencies(db_session: AsyncSession, mock_redis: MagicMock | None
     async def mock_get_db():
         yield db_session
 
+    async def mock_verify_partner():
+        return mock_partner
+
     app.dependency_overrides[get_redis] = mock_get_redis
     app.dependency_overrides[get_db] = mock_get_db
+    app.dependency_overrides[verify_partner_signature] = mock_verify_partner
 
 
 @pytest.mark.asyncio
@@ -378,7 +401,10 @@ async def test_validate_coupon_api_region_restricted(
 @pytest.mark.asyncio
 async def test_issue_coupon_api_invalid_request(
     client: TestClient,
+    db_session: AsyncSession,
 ):
+    override_dependencies(db_session)
+
     try:
         response = client.post(
             "/api/v1/coupons/issue",

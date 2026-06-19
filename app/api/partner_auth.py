@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import time
 import uuid
 from datetime import datetime
@@ -10,33 +11,60 @@ from fastapi import Depends, Header, Query, Request
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import CouponActivityError
+from app.core import CouponActivityError, ERROR_MESSAGES
 from app.db import get_db, get_redis
 from app.models import Partner, PartnerApiLog
 
+logger = logging.getLogger(__name__)
+
 
 class PartnerAuthError(CouponActivityError):
-    def __init__(self, message: str):
-        super().__init__(message=message, error_key="partner_auth_failed")
+    def __init__(self, message: str, error_key: str = "partner_auth_failed"):
+        super().__init__(message=message, error_key=error_key)
+        self.code = 401
+
+
+class PartnerForbiddenError(CouponActivityError):
+    def __init__(self, message: str, error_key: str = "partner_forbidden"):
+        super().__init__(message=message, error_key=error_key)
+        self.code = 403
+
+
+class PartnerDailyLimitError(CouponActivityError):
+    def __init__(self, message: str, error_key: str = "partner_daily_limit_reached"):
+        super().__init__(message=message, error_key=error_key)
+        self.code = 429
 
 
 async def verify_partner_signature(
     request: Request,
-    x_partner_id: str = Header(..., alias="X-Partner-Id", description="合作方标识"),
-    x_timestamp: str = Header(..., alias="X-Timestamp", description="请求时间戳（秒）"),
-    x_nonce: str = Header(..., alias="X-Nonce", description="随机字符串"),
-    x_signature: str = Header(..., alias="X-Signature", description="签名"),
+    x_partner_id: str | None = Header(None, alias="X-Partner-Id", description="合作方标识"),
+    x_timestamp: str | None = Header(None, alias="X-Timestamp", description="请求时间戳（秒）"),
+    x_nonce: str | None = Header(None, alias="X-Nonce", description="随机字符串"),
+    x_signature: str | None = Header(None, alias="X-Signature", description="签名"),
     db: AsyncSession = Depends(get_db),
     redis_client: redis.Redis | None = Depends(get_redis),
 ) -> Partner:
+    if not x_partner_id or not x_timestamp or not x_nonce or not x_signature:
+        raise PartnerAuthError(
+            message="Missing required signature headers",
+            error_key="signature_missing",
+        )
+
     now = time.time()
     try:
         ts = float(x_timestamp)
     except ValueError:
-        raise PartnerAuthError(message="Invalid timestamp format")
+        raise PartnerAuthError(
+            message="Invalid timestamp format",
+            error_key="signature_invalid",
+        )
 
     if abs(now - ts) > 300:
-        raise PartnerAuthError(message="Request timestamp expired")
+        raise PartnerAuthError(
+            message="Request timestamp expired",
+            error_key="signature_expired",
+        )
 
     stmt = select(Partner).where(
         and_(Partner.partner_id == x_partner_id, Partner.status == 1)
@@ -45,7 +73,10 @@ async def verify_partner_signature(
     partner = result.scalar_one_or_none()
 
     if not partner:
-        raise PartnerAuthError(message=f"Partner {x_partner_id} not found or disabled")
+        raise PartnerAuthError(
+            message=f"Partner {x_partner_id} not found or disabled",
+            error_key="partner_auth_failed",
+        )
 
     body_bytes = b""
     if request.method in ("POST", "PUT", "PATCH"):
@@ -60,7 +91,10 @@ async def verify_partner_signature(
     ).hexdigest()
 
     if not hmac.compare_digest(expected_sig, x_signature):
-        raise PartnerAuthError(message="Invalid signature")
+        raise PartnerAuthError(
+            message="Invalid signature",
+            error_key="signature_invalid",
+        )
 
     return partner
 
@@ -74,15 +108,17 @@ async def check_partner_permission(
     if partner.allowed_activities:
         allowed = [a.strip() for a in partner.allowed_activities.split(",") if a.strip()]
         if allowed and activity_id not in allowed:
-            raise PartnerAuthError(
-                message=f"Partner {partner.partner_id} not allowed to access activity {activity_id}"
+            raise PartnerForbiddenError(
+                message=f"Partner {partner.partner_id} not allowed to access activity {activity_id}",
+                error_key="partner_forbidden",
             )
 
     if partner.allowed_package_types:
         allowed_types = [t.strip() for t in partner.allowed_package_types.split(",") if t.strip()]
         if allowed_types and package_type not in allowed_types:
-            raise PartnerAuthError(
-                message=f"Partner {partner.partner_id} not allowed to use package type {package_type}"
+            raise PartnerForbiddenError(
+                message=f"Partner {partner.partner_id} not allowed to use package type {package_type}",
+                error_key="partner_forbidden",
             )
 
 
@@ -105,8 +141,9 @@ async def check_partner_daily_limit(
     count = (await db.execute(stmt)).scalar() or 0
 
     if count >= partner.daily_limit:
-        raise PartnerAuthError(
-            message=f"Partner {partner.partner_id} daily limit {partner.daily_limit} reached"
+        raise PartnerDailyLimitError(
+            message=f"Partner {partner.partner_id} daily limit {partner.daily_limit} reached",
+            error_key="partner_daily_limit_reached",
         )
 
 
@@ -120,16 +157,23 @@ async def log_partner_api_call(
     activity_id: str = "",
     package_type: str = "",
 ) -> None:
-    log = PartnerApiLog(
-        log_id=f"palog_{uuid.uuid4().hex}",
-        partner_id=partner_id,
-        api_path=api_path,
-        request_time=datetime.now(),
-        success=1 if success else 0,
-        error_key=error_key,
-        is_idempotent_hit=1 if is_idempotent_hit else 0,
-        activity_id=activity_id,
-        package_type=package_type,
-    )
-    db.add(log)
-    await db.commit()
+    try:
+        log = PartnerApiLog(
+            log_id=f"palog_{uuid.uuid4().hex}",
+            partner_id=partner_id,
+            api_path=api_path,
+            request_time=datetime.now(),
+            success=1 if success else 0,
+            error_key=error_key,
+            is_idempotent_hit=1 if is_idempotent_hit else 0,
+            activity_id=activity_id,
+            package_type=package_type,
+        )
+        db.add(log)
+        await db.commit()
+    except Exception:
+        logger.exception("Failed to log partner API call")
+        try:
+            await db.rollback()
+        except Exception:
+            pass

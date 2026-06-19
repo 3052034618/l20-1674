@@ -58,4 +58,10 @@ ERROR_MESSAGES: dict[str, str] = {
     "user_not_found": "用户不存在",
     "invalid_request": "请求参数错误",
     "system_error": "系统繁忙，请稍后再试",
+    "partner_auth_failed": "合作方认证失败",
+    "partner_forbidden": "合作方无权限访问",
+    "partner_daily_limit_reached": "合作方每日发券限额已用尽",
+    "signature_missing": "缺少签名头",
+    "signature_expired": "请求时间戳已过期",
+    "signature_invalid": "签名校验失败",
 }

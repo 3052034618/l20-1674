@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -22,6 +23,8 @@ from app.schemas import (
     IssueCouponRequest,
 )
 from app.services.validation_service import ValidationService
+
+logger = logging.getLogger(__name__)
 
 
 class CouponService:
@@ -103,27 +106,32 @@ class CouponService:
 
     async def _check_idempotent(self, idempotent_key: str, request: IssueCouponRequest) -> CouponInfo | None:
         if self.redis:
-            cache_key = f"{idempotent_key}"
-            cached = await self.redis.hgetall(cache_key)
-            if cached:
-                try:
-                    return CouponInfo(
-                        record_id=cached["record_id"],
-                        coupon_code=cached["coupon_code"],
-                        package_id=cached["package_id"],
-                        package_name=cached["package_name"],
-                        display_text=cached["display_text"],
-                        valid_start_time=datetime.fromisoformat(cached["valid_start_time"]),
-                        valid_end_time=datetime.fromisoformat(cached["valid_end_time"]),
-                        applicable_comics=cached["applicable_comics"].split(",") if cached.get("applicable_comics") else [],
-                    )
-                except (KeyError, ValueError):
-                    pass
+            try:
+                cached = await self.redis.hgetall(idempotent_key)
+                if cached:
+                    try:
+                        return CouponInfo(
+                            record_id=cached["record_id"],
+                            coupon_code=cached["coupon_code"],
+                            package_id=cached["package_id"],
+                            package_name=cached["package_name"],
+                            display_text=cached["display_text"],
+                            valid_start_time=datetime.fromisoformat(cached["valid_start_time"]),
+                            valid_end_time=datetime.fromisoformat(cached["valid_end_time"]),
+                            applicable_comics=cached["applicable_comics"].split(",") if cached.get("applicable_comics") else [],
+                        )
+                    except (KeyError, ValueError):
+                        pass
+            except Exception:
+                logger.exception("Redis read failed in _check_idempotent, falling back to DB")
 
         db_result = await self._check_idempotent_from_db(request)
         if db_result:
             if self.redis:
-                await self._cache_idempotent_result(idempotent_key, db_result)
+                try:
+                    await self._cache_idempotent_result(idempotent_key, db_result)
+                except Exception:
+                    logger.exception("Redis write failed in _check_idempotent fallback cache")
             return db_result
 
         return None
@@ -170,30 +178,33 @@ class CouponService:
         if not self.redis:
             return
 
-        if isinstance(user_coupon, CouponInfo):
-            data = {
-                "record_id": user_coupon.record_id,
-                "coupon_code": user_coupon.coupon_code,
-                "package_id": user_coupon.package_id,
-                "package_name": user_coupon.package_name,
-                "display_text": user_coupon.display_text,
-                "valid_start_time": user_coupon.valid_start_time.isoformat(),
-                "valid_end_time": user_coupon.valid_end_time.isoformat(),
-                "applicable_comics": ",".join(user_coupon.applicable_comics) if user_coupon.applicable_comics else "",
-            }
-        else:
-            data = {
-                "record_id": user_coupon.record_id,
-                "coupon_code": user_coupon.coupon_code,
-                "package_id": user_coupon.package_id,
-                "package_name": coupon_package.name if coupon_package else user_coupon.display_text,
-                "display_text": user_coupon.display_text,
-                "valid_start_time": user_coupon.valid_start_time.isoformat(),
-                "valid_end_time": user_coupon.valid_end_time.isoformat(),
-                "applicable_comics": user_coupon.applicable_comics,
-            }
-        await self.redis.hset(idempotent_key, mapping=data)
-        await self.redis.expire(idempotent_key, 86400 * 30)
+        try:
+            if isinstance(user_coupon, CouponInfo):
+                data = {
+                    "record_id": user_coupon.record_id,
+                    "coupon_code": user_coupon.coupon_code,
+                    "package_id": user_coupon.package_id,
+                    "package_name": user_coupon.package_name,
+                    "display_text": user_coupon.display_text,
+                    "valid_start_time": user_coupon.valid_start_time.isoformat(),
+                    "valid_end_time": user_coupon.valid_end_time.isoformat(),
+                    "applicable_comics": ",".join(user_coupon.applicable_comics) if user_coupon.applicable_comics else "",
+                }
+            else:
+                data = {
+                    "record_id": user_coupon.record_id,
+                    "coupon_code": user_coupon.coupon_code,
+                    "package_id": user_coupon.package_id,
+                    "package_name": coupon_package.name if coupon_package else user_coupon.display_text,
+                    "display_text": user_coupon.display_text,
+                    "valid_start_time": user_coupon.valid_start_time.isoformat(),
+                    "valid_end_time": user_coupon.valid_end_time.isoformat(),
+                    "applicable_comics": user_coupon.applicable_comics,
+                }
+            await self.redis.hset(idempotent_key, mapping=data)
+            await self.redis.expire(idempotent_key, 86400 * 30)
+        except Exception:
+            logger.exception("Redis write failed in _cache_idempotent_result")
 
     async def _get_and_lock_sku(self, package_id: str) -> CouponPackageSku | None:
         stmt = (
@@ -276,9 +287,12 @@ class CouponService:
         stock_key = f"coupon:stock:{coupon_package.package_id}"
 
         if self.redis:
-            new_stock = await self.redis.decr(stock_key)
-            if new_stock < 0:
-                await self.redis.set(stock_key, 0)
+            try:
+                new_stock = await self.redis.decr(stock_key)
+                if new_stock < 0:
+                    await self.redis.set(stock_key, 0)
+            except Exception:
+                logger.exception("Redis decr failed in _decrement_stock")
 
         stmt = (
             update(CouponPackage)
@@ -303,8 +317,11 @@ class CouponService:
         if not self.redis:
             return
 
-        cache_key = f"coupon:claimed:{user_id}:{activity_id}:{package_id}"
-        await self.redis.setex(cache_key, 86400, "1")
+        try:
+            cache_key = f"coupon:claimed:{user_id}:{activity_id}:{package_id}"
+            await self.redis.setex(cache_key, 86400, "1")
+        except Exception:
+            logger.exception("Redis setex failed in _cache_claimed_status")
 
     def _build_coupon_info(self, user_coupon: UserCoupon, coupon_package: CouponPackage) -> CouponInfo:
         applicable_comics = []

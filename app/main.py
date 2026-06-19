@@ -7,8 +7,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api import api_router
+from app.api.partner_auth import PartnerAuthError, PartnerDailyLimitError, PartnerForbiddenError
 from app.config import settings
-from app.core import ERROR_MESSAGES
+from app.core import CouponException, ERROR_MESSAGES
 from app.db import close_redis, init_redis
 from app.db.session import Base, engine
 
@@ -69,6 +70,58 @@ def create_app() -> FastAPI:
                 "code": 400,
                 "message": "请求参数验证失败",
                 "user_message": ERROR_MESSAGES["invalid_request"],
+                "data": None,
+            },
+        )
+
+    @app.exception_handler(PartnerAuthError)
+    async def partner_auth_exception_handler(request, exc):
+        return JSONResponse(
+            status_code=exc.code,
+            content={
+                "success": False,
+                "code": exc.code,
+                "message": exc.message,
+                "user_message": exc.user_message,
+                "data": None,
+            },
+        )
+
+    @app.exception_handler(PartnerForbiddenError)
+    async def partner_forbidden_exception_handler(request, exc):
+        return JSONResponse(
+            status_code=exc.code,
+            content={
+                "success": False,
+                "code": exc.code,
+                "message": exc.message,
+                "user_message": exc.user_message,
+                "data": None,
+            },
+        )
+
+    @app.exception_handler(PartnerDailyLimitError)
+    async def partner_daily_limit_exception_handler(request, exc):
+        return JSONResponse(
+            status_code=exc.code,
+            content={
+                "success": False,
+                "code": exc.code,
+                "message": exc.message,
+                "user_message": exc.user_message,
+                "data": None,
+            },
+        )
+
+    @app.exception_handler(CouponException)
+    async def coupon_exception_handler(request, exc):
+        return JSONResponse(
+            status_code=exc.code,
+            content={
+                "success": False,
+                "code": exc.code,
+                "message": exc.message,
+                "user_message": exc.user_message,
                 "data": None,
             },
         )

@@ -2,11 +2,12 @@ from .constants import ERROR_MESSAGES
 
 
 class CouponException(Exception):
-    def __init__(self, message: str, code: int = 400, user_message: str | None = None):
+    def __init__(self, message: str, code: int = 400, user_message: str | None = None, error_key: str = ""):
         super().__init__(message)
         self.code = code
         self.user_message = user_message or message
         self.message = message
+        self.error_key = error_key
 
 
 class CouponAlreadyClaimedError(CouponException):
@@ -33,6 +34,7 @@ class CouponEligibilityError(CouponException):
             message=message,
             code=403,
             user_message=ERROR_MESSAGES.get(error_key, message),
+            error_key=error_key,
         )
 
 
@@ -42,6 +44,7 @@ class CouponActivityError(CouponException):
             message=message,
             code=412,
             user_message=ERROR_MESSAGES.get(error_key, message),
+            error_key=error_key,
         )
 
 
@@ -51,4 +54,5 @@ class CouponUserError(CouponException):
             message=message,
             code=404,
             user_message=ERROR_MESSAGES.get(error_key, message),
+            error_key=error_key,
         )

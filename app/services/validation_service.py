@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -13,6 +14,8 @@ from app.core import (
     CouponStockError,
     CouponUserError,
 )
+
+logger = logging.getLogger(__name__)
 from app.models import Activity, CouponPackage, User, UserCoupon
 from app.schemas import IssueCouponRequest, ValidateCouponRequest
 
@@ -131,12 +134,17 @@ class ValidationService:
     async def _validate_not_claimed(self, user_id: str, activity_id: str, package_id: str) -> None:
         cache_key = f"coupon:claimed:{user_id}:{activity_id}:{package_id}"
         if self.redis:
-            cached = await self.redis.get(cache_key)
-            if cached:
-                raise CouponAlreadyClaimedError(
-                    message=f"User {user_id} has already claimed coupon for "
-                    f"activity {activity_id} and package {package_id}"
-                )
+            try:
+                cached = await self.redis.get(cache_key)
+                if cached:
+                    raise CouponAlreadyClaimedError(
+                        message=f"User {user_id} has already claimed coupon for "
+                        f"activity {activity_id} and package {package_id}"
+                    )
+            except CouponAlreadyClaimedError:
+                raise
+            except Exception:
+                logger.exception("Redis get failed in _validate_not_claimed")
 
         stmt = select(UserCoupon).where(
             and_(
@@ -150,7 +158,10 @@ class ValidationService:
         existing = result.scalar_one_or_none()
         if existing:
             if self.redis:
-                await self.redis.setex(cache_key, 86400, "1")
+                try:
+                    await self.redis.setex(cache_key, 86400, "1")
+                except Exception:
+                    logger.exception("Redis setex failed in _validate_already_claimed")
             raise CouponAlreadyClaimedError(
                 message=f"User {user_id} has already claimed coupon for "
                 f"activity {activity_id} and package {package_id}"
@@ -161,14 +172,20 @@ class ValidationService:
         remaining = None
 
         if self.redis:
-            remaining_str = await self.redis.get(stock_key)
-            if remaining_str is not None:
-                remaining = int(remaining_str)
+            try:
+                remaining_str = await self.redis.get(stock_key)
+                if remaining_str is not None:
+                    remaining = int(remaining_str)
+            except Exception:
+                logger.exception("Redis get failed in _validate_stock")
 
         if remaining is None:
             remaining = await self._get_real_stock(coupon_package.package_id)
             if self.redis:
-                await self.redis.setex(stock_key, 300, str(remaining))
+                try:
+                    await self.redis.setex(stock_key, 300, str(remaining))
+                except Exception:
+                    logger.exception("Redis setex failed in _validate_stock")
 
         if remaining <= 0:
             raise CouponStockError(
