@@ -218,3 +218,87 @@ class StockRecalculateResponse(BaseModel):
     message: str = Field(..., description="消息")
     user_message: str = Field(..., description="给前端展示的消息")
     data: dict[str, Any] | None = Field(default=None, description="重算结果")
+
+
+class CreatePartnerRequest(BaseModel):
+    partner_id: str = Field(..., description="合作方标识", min_length=1, max_length=64)
+    name: str = Field(..., description="合作方名称", min_length=1, max_length=128)
+    allowed_activities: str = Field(default="", description="允许调用的活动ID，逗号分隔", max_length=1024)
+    allowed_package_types: str = Field(default="", description="允许调用的券包类型，逗号分隔", max_length=256)
+    daily_limit: int = Field(default=0, description="每日发券上限，0表示不限", ge=0)
+
+    @field_validator("partner_id", "name")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("不能为空字符串")
+        return v.strip()
+
+
+class CreatePartnerResponse(BaseModel):
+    success: bool = Field(..., description="是否成功")
+    code: int = Field(..., description="状态码")
+    message: str = Field(..., description="消息")
+    user_message: str = Field(..., description="给前端展示的消息")
+    data: dict[str, Any] | None = Field(default=None, description="合作方信息")
+
+
+class UpdatePartnerRequest(BaseModel):
+    partner_id: str = Field(..., description="合作方标识", min_length=1, max_length=64)
+    name: str | None = Field(default=None, description="合作方名称", max_length=128)
+    allowed_activities: str | None = Field(default=None, description="允许调用的活动ID，逗号分隔", max_length=1024)
+    allowed_package_types: str | None = Field(default=None, description="允许调用的券包类型，逗号分隔", max_length=256)
+    daily_limit: int | None = Field(default=None, description="每日发券上限", ge=0)
+    status: int | None = Field(default=None, description="状态：0-禁用 1-启用")
+
+    @field_validator("partner_id")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("不能为空字符串")
+        return v.strip()
+
+
+class UpdatePartnerResponse(BaseModel):
+    success: bool = Field(..., description="是否成功")
+    code: int = Field(..., description="状态码")
+    message: str = Field(..., description="消息")
+    user_message: str = Field(..., description="给前端展示的消息")
+    data: dict[str, Any] | None = Field(default=None, description="合作方信息")
+
+
+class PartnerListResponse(BaseModel):
+    success: bool = Field(..., description="是否成功")
+    code: int = Field(..., description="状态码")
+    message: str = Field(..., description="消息")
+    user_message: str = Field(..., description="给前端展示的消息")
+    data: list[dict[str, Any]] | None = Field(default=None, description="合作方列表")
+
+
+class ResetPartnerSignKeyResponse(BaseModel):
+    success: bool = Field(..., description="是否成功")
+    code: int = Field(..., description="状态码")
+    message: str = Field(..., description="消息")
+    user_message: str = Field(..., description="给前端展示的消息")
+    data: dict[str, Any] | None = Field(default=None, description="新密钥信息")
+
+
+class PartnerReportRequest(BaseModel):
+    partner_id: str = Field(..., description="合作方标识", min_length=1, max_length=64)
+    start_time: datetime | None = Field(default=None, description="统计开始时间")
+    end_time: datetime | None = Field(default=None, description="统计结束时间")
+
+    @field_validator("partner_id")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("不能为空字符串")
+        return v.strip()
+
+
+class PartnerReportResponse(BaseModel):
+    success: bool = Field(..., description="是否成功")
+    code: int = Field(..., description="状态码")
+    message: str = Field(..., description="消息")
+    user_message: str = Field(..., description="给前端展示的消息")
+    data: dict[str, Any] | None = Field(default=None, description="报表数据")

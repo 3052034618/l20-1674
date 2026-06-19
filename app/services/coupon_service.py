@@ -60,7 +60,7 @@ class CouponService:
             await self._cache_claimed_status(user.user_id, activity.activity_id, coupon_package.package_id)
 
             if idempotent_key:
-                await self._cache_idempotent_result(idempotent_key, user_coupon)
+                await self._cache_idempotent_result(idempotent_key, user_coupon, coupon_package)
 
         await self.db.commit()
 
@@ -153,9 +153,20 @@ class CouponService:
         package_result = await self.db.execute(package_stmt)
         coupon_package = package_result.scalar_one_or_none()
 
-        return self._build_coupon_info(user_coupon, coupon_package or user_coupon)
+        if not coupon_package:
+            return CouponInfo(
+                record_id=user_coupon.record_id,
+                coupon_code=user_coupon.coupon_code,
+                package_id=user_coupon.package_id,
+                package_name=user_coupon.display_text,
+                display_text=user_coupon.display_text,
+                valid_start_time=user_coupon.valid_start_time,
+                valid_end_time=user_coupon.valid_end_time,
+                applicable_comics=[c.strip() for c in user_coupon.applicable_comics.split(",") if c.strip()] if user_coupon.applicable_comics else [],
+            )
+        return self._build_coupon_info(user_coupon, coupon_package)
 
-    async def _cache_idempotent_result(self, idempotent_key: str, user_coupon: UserCoupon | CouponInfo) -> None:
+    async def _cache_idempotent_result(self, idempotent_key: str, user_coupon: UserCoupon | CouponInfo, coupon_package: CouponPackage | None = None) -> None:
         if not self.redis:
             return
 
@@ -175,7 +186,7 @@ class CouponService:
                 "record_id": user_coupon.record_id,
                 "coupon_code": user_coupon.coupon_code,
                 "package_id": user_coupon.package_id,
-                "package_name": user_coupon.display_text,
+                "package_name": coupon_package.name if coupon_package else user_coupon.display_text,
                 "display_text": user_coupon.display_text,
                 "valid_start_time": user_coupon.valid_start_time.isoformat(),
                 "valid_end_time": user_coupon.valid_end_time.isoformat(),

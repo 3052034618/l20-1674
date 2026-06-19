@@ -7,14 +7,17 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import ActivityStatus, CouponActivityError, CouponException, CouponStatus
-from app.models import Activity, CouponPackage, CouponPackageSku, UserBehaviorLog, UserCoupon
+from app.models import Activity, CouponPackage, CouponPackageSku, Partner, PartnerApiLog, UserBehaviorLog, UserCoupon
 from app.schemas.admin import (
     BehaviorStatsRequest,
     CreateActivityRequest,
     CreateCouponPackageRequest,
+    CreatePartnerRequest,
     GenerateCouponCodesRequest,
     ImportCouponCodesRequest,
+    PartnerReportRequest,
     UpdateActivityStatusRequest,
+    UpdatePartnerRequest,
 )
 
 
@@ -261,7 +264,8 @@ class AdminService:
             "package_name": package_obj.name,
             "total_quantity": package_obj.total_quantity,
             "available": available,
-            "claimed": claimed,
+            "claimed_unused": claimed,
+            "issued": claimed + used,
             "used": used,
             "claimed_quantity": package_obj.claimed_quantity,
         }
@@ -389,7 +393,13 @@ class AdminService:
                 )
             )).scalar() or 0
 
-            sku_claimed = (await self.db.execute(
+            sku_issued = (await self.db.execute(
+                select(func.count()).select_from(CouponPackageSku).where(
+                    and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status.in_([1, 2]))
+                )
+            )).scalar() or 0
+
+            sku_claimed_unused = (await self.db.execute(
                 select(func.count()).select_from(CouponPackageSku).where(
                     and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status == 1)
                 )
@@ -408,7 +418,7 @@ class AdminService:
             )).scalar() or 0
 
             config_vs_sku_diff = pkg.total_quantity - sku_total
-            claimed_vs_sku_claimed_diff = pkg.claimed_quantity - sku_claimed
+            issued_vs_sku_issued_diff = pkg.claimed_quantity - sku_issued
 
             reconcile_list.append({
                 "package_id": pkg.package_id,
@@ -418,12 +428,13 @@ class AdminService:
                 "sku_total": sku_total,
                 "config_vs_sku_diff": config_vs_sku_diff,
                 "available": sku_available,
-                "sku_claimed": sku_claimed,
+                "sku_issued": sku_issued,
+                "sku_claimed_unused": sku_claimed_unused,
                 "claimed_quantity": pkg.claimed_quantity,
-                "claimed_vs_sku_claimed_diff": claimed_vs_sku_claimed_diff,
+                "issued_vs_sku_issued_diff": issued_vs_sku_issued_diff,
                 "sku_used": sku_used,
                 "sku_expired": sku_expired,
-                "has_discrepancy": config_vs_sku_diff != 0 or claimed_vs_sku_claimed_diff != 0,
+                "has_discrepancy": config_vs_sku_diff != 0 or issued_vs_sku_issued_diff != 0,
             })
 
         return {
@@ -455,9 +466,9 @@ class AdminService:
                 )
             )).scalar() or 0
 
-            sku_claimed = (await self.db.execute(
+            sku_issued = (await self.db.execute(
                 select(func.count()).select_from(CouponPackageSku).where(
-                    and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status == 1)
+                    and_(CouponPackageSku.package_id == pkg.package_id, CouponPackageSku.status.in_([1, 2]))
                 )
             )).scalar() or 0
 
@@ -467,7 +478,7 @@ class AdminService:
             await self.db.execute(
                 update(CouponPackage)
                 .where(CouponPackage.id == pkg.id)
-                .values(total_quantity=sku_total, claimed_quantity=sku_claimed)
+                .values(total_quantity=sku_total, claimed_quantity=sku_issued)
             )
 
             if self.redis:
@@ -483,8 +494,8 @@ class AdminService:
                 "package_id": pkg.package_id,
                 "package_name": pkg.name,
                 "total_quantity": {"before": old_total, "after": sku_total},
-                "claimed_quantity": {"before": old_claimed, "after": sku_claimed},
-                "was_correct": old_total == sku_total and old_claimed == sku_claimed,
+                "issued_quantity": {"before": old_claimed, "after": sku_issued},
+                "was_correct": old_total == sku_total and old_claimed == sku_issued,
             })
 
         await self.db.commit()
@@ -641,3 +652,203 @@ class AdminService:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         random_part = uuid.uuid4().hex[:12].upper()
         return f"{prefix}{timestamp}{random_part}"
+
+    async def create_partner(self, request: CreatePartnerRequest) -> dict[str, Any]:
+        existing = await self.db.execute(
+            select(Partner).where(Partner.partner_id == request.partner_id)
+        )
+        if existing.scalar_one_or_none():
+            raise CouponActivityError(
+                message=f"Partner {request.partner_id} already exists",
+                error_key="partner_already_exists",
+            )
+
+        sign_key = uuid.uuid4().hex
+
+        partner = Partner(
+            partner_id=request.partner_id,
+            name=request.name,
+            sign_key=sign_key,
+            allowed_activities=request.allowed_activities,
+            allowed_package_types=request.allowed_package_types,
+            daily_limit=request.daily_limit,
+            status=1,
+        )
+
+        self.db.add(partner)
+        await self.db.commit()
+        await self.db.refresh(partner)
+
+        return {
+            "partner_id": partner.partner_id,
+            "name": partner.name,
+            "sign_key": partner.sign_key,
+            "allowed_activities": partner.allowed_activities,
+            "allowed_package_types": partner.allowed_package_types,
+            "daily_limit": partner.daily_limit,
+            "status": partner.status,
+            "created_at": partner.created_at.isoformat(),
+        }
+
+    async def update_partner(self, request: UpdatePartnerRequest) -> dict[str, Any]:
+        result = await self.db.execute(
+            select(Partner).where(Partner.partner_id == request.partner_id)
+        )
+        partner = result.scalar_one_or_none()
+        if not partner:
+            raise CouponActivityError(
+                message=f"Partner {request.partner_id} not found",
+                error_key="partner_not_found",
+            )
+
+        if request.name is not None:
+            partner.name = request.name
+        if request.allowed_activities is not None:
+            partner.allowed_activities = request.allowed_activities
+        if request.allowed_package_types is not None:
+            partner.allowed_package_types = request.allowed_package_types
+        if request.daily_limit is not None:
+            partner.daily_limit = request.daily_limit
+        if request.status is not None:
+            partner.status = request.status
+
+        await self.db.commit()
+        await self.db.refresh(partner)
+
+        return {
+            "partner_id": partner.partner_id,
+            "name": partner.name,
+            "sign_key": partner.sign_key,
+            "allowed_activities": partner.allowed_activities,
+            "allowed_package_types": partner.allowed_package_types,
+            "daily_limit": partner.daily_limit,
+            "status": partner.status,
+        }
+
+    async def list_partners(self, skip: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        stmt = select(Partner).order_by(Partner.created_at.desc()).offset(skip).limit(limit)
+        result = await self.db.execute(stmt)
+        partners = result.scalars().all()
+
+        return [
+            {
+                "partner_id": p.partner_id,
+                "name": p.name,
+                "allowed_activities": p.allowed_activities,
+                "allowed_package_types": p.allowed_package_types,
+                "daily_limit": p.daily_limit,
+                "status": p.status,
+                "status_label": "启用" if p.status == 1 else "禁用",
+                "created_at": p.created_at.isoformat(),
+            }
+            for p in partners
+        ]
+
+    async def reset_partner_sign_key(self, partner_id: str) -> dict[str, Any]:
+        result = await self.db.execute(
+            select(Partner).where(Partner.partner_id == partner_id)
+        )
+        partner = result.scalar_one_or_none()
+        if not partner:
+            raise CouponActivityError(
+                message=f"Partner {partner_id} not found",
+                error_key="partner_not_found",
+            )
+
+        new_key = uuid.uuid4().hex
+        partner.sign_key = new_key
+        await self.db.commit()
+        await self.db.refresh(partner)
+
+        return {
+            "partner_id": partner.partner_id,
+            "sign_key": partner.sign_key,
+        }
+
+    async def get_partner_report(self, request: PartnerReportRequest) -> dict[str, Any]:
+        result = await self.db.execute(
+            select(Partner).where(Partner.partner_id == request.partner_id)
+        )
+        if not result.scalar_one_or_none():
+            raise CouponActivityError(
+                message=f"Partner {request.partner_id} not found",
+                error_key="partner_not_found",
+            )
+
+        conditions = [PartnerApiLog.partner_id == request.partner_id]
+        if request.start_time:
+            conditions.append(PartnerApiLog.request_time >= request.start_time)
+        if request.end_time:
+            conditions.append(PartnerApiLog.request_time <= request.end_time)
+
+        daily_stmt = select(
+            func.date(PartnerApiLog.request_time).label("log_date"),
+            PartnerApiLog.success,
+            PartnerApiLog.is_idempotent_hit,
+            PartnerApiLog.api_path,
+            PartnerApiLog.error_key,
+            func.count(PartnerApiLog.log_id)
+        ).where(and_(*conditions)).group_by(
+            func.date(PartnerApiLog.request_time),
+            PartnerApiLog.success,
+            PartnerApiLog.is_idempotent_hit,
+            PartnerApiLog.api_path,
+            PartnerApiLog.error_key,
+        )
+
+        daily_result = await self.db.execute(daily_stmt)
+        raw_data: dict[str, dict[str, Any]] = {}
+
+        for row in daily_result.all():
+            log_date, success, is_idempotent_hit, api_path, error_key, count = row
+            date_str = str(log_date)
+            if date_str not in raw_data:
+                raw_data[date_str] = {
+                    "total_requests": 0,
+                    "success_count": 0,
+                    "fail_count": 0,
+                    "issue_count": 0,
+                    "idempotent_hit_count": 0,
+                    "error_distribution": {},
+                }
+            d = raw_data[date_str]
+            d["total_requests"] += count
+            if success == 1:
+                d["success_count"] += count
+                if api_path == "/api/v1/coupon/issue":
+                    d["issue_count"] += count
+            else:
+                d["fail_count"] += count
+                ek = error_key or "unknown"
+                d["error_distribution"][ek] = d["error_distribution"].get(ek, 0) + count
+            if is_idempotent_hit == 1:
+                d["idempotent_hit_count"] += count
+
+        daily_list = []
+        for date_str in sorted(raw_data.keys()):
+            d = raw_data[date_str]
+            daily_list.append({
+                "date": date_str,
+                "total_requests": d["total_requests"],
+                "success_count": d["success_count"],
+                "fail_count": d["fail_count"],
+                "error_distribution": d["error_distribution"],
+                "issue_count": d["issue_count"],
+                "idempotent_hit_count": d["idempotent_hit_count"],
+            })
+
+        total_summary = {
+            "total_requests": sum(d["total_requests"] for d in raw_data.values()),
+            "success_count": sum(d["success_count"] for d in raw_data.values()),
+            "fail_count": sum(d["fail_count"] for d in raw_data.values()),
+            "issue_count": sum(d["issue_count"] for d in raw_data.values()),
+            "idempotent_hit_count": sum(d["idempotent_hit_count"] for d in raw_data.values()),
+        }
+
+        return {
+            "partner_id": request.partner_id,
+            "start_time": request.start_time.isoformat() if request.start_time else None,
+            "end_time": request.end_time.isoformat() if request.end_time else None,
+            "summary": total_summary,
+            "daily": daily_list,
+        }

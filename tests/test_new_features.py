@@ -310,7 +310,8 @@ async def test_get_package_stats(
 
     assert result["total_quantity"] == test_coupon_package.total_quantity
     assert result["available"] == len(test_coupon_skus) - 2
-    assert result["claimed"] == 1
+    assert result["claimed_unused"] == 1
+    assert result["issued"] == 2
     assert result["used"] == 1
 
 

@@ -14,16 +14,24 @@ from app.schemas.admin import (
     CreateActivityResponse,
     CreateCouponPackageRequest,
     CreateCouponPackageResponse,
+    CreatePartnerRequest,
+    CreatePartnerResponse,
     GenerateCouponCodesRequest,
     GenerateCouponCodesResponse,
     ImportCouponCodesRequest,
     ImportCouponCodesResponse,
     PackageListResponse,
     PackageStatsResponse,
+    PartnerListResponse,
+    PartnerReportRequest,
+    PartnerReportResponse,
+    ResetPartnerSignKeyResponse,
     StockReconcileResponse,
     StockRecalculateResponse,
     UpdateActivityStatusRequest,
     UpdateActivityStatusResponse,
+    UpdatePartnerRequest,
+    UpdatePartnerResponse,
 )
 from app.services.admin_service import AdminService
 
@@ -426,6 +434,187 @@ async def stock_recalculate(
     except Exception as e:
         logger.exception(f"Unexpected error in stock_recalculate: {str(e)}")
         return StockRecalculateResponse(
+            success=False,
+            code=500,
+            message=str(e),
+            user_message=ERROR_MESSAGES["system_error"],
+            data=None,
+        )
+
+
+@router.post("/partners", response_model=CreatePartnerResponse, summary="创建合作方")
+async def create_partner(
+    request: CreatePartnerRequest,
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+) -> CreatePartnerResponse:
+    try:
+        service = AdminService(db, redis_client)
+        result = await service.create_partner(request)
+        return CreatePartnerResponse(
+            success=True,
+            code=200,
+            message="合作方创建成功",
+            user_message="合作方创建成功",
+            data=result,
+        )
+    except CouponException as e:
+        logger.warning(f"Create partner failed: {e.message}")
+        return CreatePartnerResponse(
+            success=False,
+            code=e.code,
+            message=e.message,
+            user_message=e.user_message,
+            data=None,
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in create_partner: {str(e)}")
+        return CreatePartnerResponse(
+            success=False,
+            code=500,
+            message=str(e),
+            user_message=ERROR_MESSAGES["system_error"],
+            data=None,
+        )
+
+
+@router.get("/partners", response_model=PartnerListResponse, summary="查询合作方列表")
+async def list_partners(
+    skip: int = Query(0, description="分页偏移", ge=0),
+    limit: int = Query(100, description="每页数量", ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+) -> PartnerListResponse:
+    try:
+        service = AdminService(db, redis_client)
+        result = await service.list_partners(skip, limit)
+        return PartnerListResponse(
+            success=True,
+            code=200,
+            message="查询成功",
+            user_message="",
+            data=result,
+        )
+    except CouponException as e:
+        logger.warning(f"List partners failed: {e.message}")
+        return PartnerListResponse(
+            success=False,
+            code=e.code,
+            message=e.message,
+            user_message=e.user_message,
+            data=None,
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in list_partners: {str(e)}")
+        return PartnerListResponse(
+            success=False,
+            code=500,
+            message=str(e),
+            user_message=ERROR_MESSAGES["system_error"],
+            data=None,
+        )
+
+
+@router.put("/partners", response_model=UpdatePartnerResponse, summary="更新合作方")
+async def update_partner(
+    request: UpdatePartnerRequest,
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+) -> UpdatePartnerResponse:
+    try:
+        service = AdminService(db, redis_client)
+        result = await service.update_partner(request)
+        return UpdatePartnerResponse(
+            success=True,
+            code=200,
+            message="更新成功",
+            user_message="更新成功",
+            data=result,
+        )
+    except CouponException as e:
+        logger.warning(f"Update partner failed: {e.message}")
+        return UpdatePartnerResponse(
+            success=False,
+            code=e.code,
+            message=e.message,
+            user_message=e.user_message,
+            data=None,
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in update_partner: {str(e)}")
+        return UpdatePartnerResponse(
+            success=False,
+            code=500,
+            message=str(e),
+            user_message=ERROR_MESSAGES["system_error"],
+            data=None,
+        )
+
+
+@router.post("/partners/{partner_id}/reset-key", response_model=ResetPartnerSignKeyResponse, summary="重置合作方签名密钥")
+async def reset_partner_sign_key(
+    partner_id: str,
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+) -> ResetPartnerSignKeyResponse:
+    try:
+        service = AdminService(db, redis_client)
+        result = await service.reset_partner_sign_key(partner_id)
+        return ResetPartnerSignKeyResponse(
+            success=True,
+            code=200,
+            message="密钥重置成功",
+            user_message="密钥重置成功",
+            data=result,
+        )
+    except CouponException as e:
+        logger.warning(f"Reset partner sign key failed: {e.message}, partner_id={partner_id}")
+        return ResetPartnerSignKeyResponse(
+            success=False,
+            code=e.code,
+            message=e.message,
+            user_message=e.user_message,
+            data=None,
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in reset_partner_sign_key: {str(e)}")
+        return ResetPartnerSignKeyResponse(
+            success=False,
+            code=500,
+            message=str(e),
+            user_message=ERROR_MESSAGES["system_error"],
+            data=None,
+        )
+
+
+@router.post("/partners/report", response_model=PartnerReportResponse, summary="合作方调用报表")
+async def get_partner_report(
+    request: PartnerReportRequest,
+    db: AsyncSession = Depends(get_db),
+    redis_client: redis.Redis = Depends(get_redis),
+) -> PartnerReportResponse:
+    try:
+        service = AdminService(db, redis_client)
+        result = await service.get_partner_report(request)
+        return PartnerReportResponse(
+            success=True,
+            code=200,
+            message="查询成功",
+            user_message="",
+            data=result,
+        )
+    except CouponException as e:
+        logger.warning(f"Get partner report failed: {e.message}, partner_id={request.partner_id}")
+        return PartnerReportResponse(
+            success=False,
+            code=e.code,
+            message=e.message,
+            user_message=e.user_message,
+            data=None,
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error in get_partner_report: {str(e)}")
+        return PartnerReportResponse(
             success=False,
             code=500,
             message=str(e),

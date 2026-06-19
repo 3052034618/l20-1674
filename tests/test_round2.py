@@ -247,7 +247,7 @@ async def test_stock_reconcile_no_discrepancy(
 
     pkg = result["packages"][0]
     assert pkg["config_vs_sku_diff"] == 0
-    assert pkg["claimed_vs_sku_claimed_diff"] == 0
+    assert pkg["issued_vs_sku_issued_diff"] == 0
     assert pkg["has_discrepancy"] is False
 
 
@@ -269,8 +269,8 @@ async def test_stock_recalculate(
     pkg = result["recalculated_packages"][0]
     assert pkg["total_quantity"]["before"] == 999
     assert pkg["total_quantity"]["after"] == len(test_coupon_skus)
-    assert pkg["claimed_quantity"]["before"] == 50
-    assert pkg["claimed_quantity"]["after"] == 0
+    assert pkg["issued_quantity"]["before"] == 50
+    assert pkg["issued_quantity"]["after"] == 0
     assert pkg["was_correct"] is False
 
     await db_session.refresh(test_coupon_package)
