@@ -289,6 +289,7 @@ async def test_validate_all_success(
     test_activity: Activity,
     test_coupon_package: CouponPackage,
     test_user: User,
+    test_coupon_skus: list,
 ) -> None:
     request = IssueCouponRequest(
         user_id=test_user.user_id,
@@ -312,6 +313,7 @@ async def test_validate_with_validate_request(
     test_vip_activity: Activity,
     test_vip_coupon_package: CouponPackage,
     test_vip_user: User,
+    test_vip_coupon_skus: list,
 ) -> None:
     request = ValidateCouponRequest(
         user_id=test_vip_user.user_id,

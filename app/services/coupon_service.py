@@ -31,8 +31,9 @@ class CouponService:
         self.validation_service = ValidationService(db, redis_client)
 
     async def issue_coupon(self, request: IssueCouponRequest) -> CouponInfo:
-        if request.request_id:
-            idempotent_result = await self._check_idempotent(request.request_id)
+        idempotent_key = self._build_idempotent_key(request)
+        if idempotent_key:
+            idempotent_result = await self._check_idempotent(idempotent_key)
             if idempotent_result:
                 return idempotent_result
 
@@ -47,15 +48,19 @@ class CouponService:
                 raise CouponStockError(message="No available SKU found")
 
             user_coupon = await self._create_user_coupon(
-                user, activity, coupon_package, sku, request.trigger_scene.value)
+                user, activity, coupon_package, sku, request.trigger_scene.value,
+                external_user_id=request.external_user_id,
+                partner_id=request.partner_id,
+                biz_serial_no=request.biz_serial_no,
+            )
 
             await self._update_sku_status(sku, user.user_id, user_coupon)
             await self._decrement_stock(coupon_package)
 
             await self._cache_claimed_status(user.user_id, activity.activity_id, coupon_package.package_id)
 
-            if request.request_id:
-                await self._cache_idempotent_result(request.request_id, user_coupon)
+            if idempotent_key:
+                await self._cache_idempotent_result(idempotent_key, user_coupon)
 
         await self.db.commit()
 
@@ -64,7 +69,7 @@ class CouponService:
     async def validate_eligibility(self, request: Any) -> dict[str, Any]:
         validation_data = await self.validation_service.validate_all(request)
         coupon_package = validation_data["coupon_package"]
-        remaining = coupon_package.total_quantity - coupon_package.claimed_quantity
+        remaining = await self._get_real_stock(coupon_package.package_id)
 
         return {
             "eligible": True,
@@ -152,6 +157,13 @@ class CouponService:
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
+    def _build_idempotent_key(self, request: IssueCouponRequest) -> str | None:
+        if request.partner_id and request.biz_serial_no:
+            return f"coupon:idempotent:biz:{request.partner_id}:{request.biz_serial_no}"
+        if request.request_id:
+            return f"coupon:idempotent:req:{request.request_id}"
+        return None
+
     async def _create_user_coupon(
         self,
         user: User,
@@ -159,6 +171,9 @@ class CouponService:
         coupon_package: CouponPackage,
         sku: CouponPackageSku,
         trigger_scene: str,
+        external_user_id: str | None = None,
+        partner_id: str | None = None,
+        biz_serial_no: str | None = None,
     ) -> UserCoupon:
         now = datetime.now()
         valid_days = coupon_package.valid_days or settings.DEFAULT_COUPON_EXPIRE_DAYS
@@ -179,6 +194,9 @@ class CouponService:
             valid_end_time=valid_end,
             applicable_comics=coupon_package.applicable_comics,
             display_text=coupon_package.display_text,
+            external_user_id=external_user_id or "",
+            partner_id=partner_id or "",
+            biz_serial_no=biz_serial_no or "",
         )
 
         self.db.add(user_coupon)
@@ -217,19 +235,15 @@ class CouponService:
         )
         await self.db.execute(stmt)
 
-        result = await self.db.execute(
-            select(func.count())
-            .select_from(CouponPackageSku)
-            .where(
-                and_(
-                    CouponPackageSku.package_id == coupon_package.package_id,
-                    CouponPackageSku.status == 0,
-                )
+    async def _get_real_stock(self, package_id: str) -> int:
+        stmt = select(func.count()).select_from(CouponPackageSku).where(
+            and_(
+                CouponPackageSku.package_id == package_id,
+                CouponPackageSku.status == 0,
             )
         )
-        remaining = result.scalar() or 0
-        if remaining == 0:
-            raise CouponStockError(message="No more stock available")
+        result = await self.db.execute(stmt)
+        return result.scalar() or 0
 
     async def _cache_claimed_status(self, user_id: str, activity_id: str, package_id: str) -> None:
         if not self.redis:

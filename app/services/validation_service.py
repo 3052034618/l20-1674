@@ -166,7 +166,7 @@ class ValidationService:
                 remaining = int(remaining_str)
 
         if remaining is None:
-            remaining = coupon_package.total_quantity - coupon_package.claimed_quantity
+            remaining = await self._get_real_stock(coupon_package.package_id)
             if self.redis:
                 await self.redis.setex(stock_key, 300, str(remaining))
 
@@ -174,3 +174,16 @@ class ValidationService:
             raise CouponStockError(
                 message=f"Insufficient stock for package {coupon_package.package_id}"
             )
+
+    async def _get_real_stock(self, package_id: str) -> int:
+        from sqlalchemy import func
+        from app.models import CouponPackageSku
+
+        stmt = select(func.count()).select_from(CouponPackageSku).where(
+            and_(
+                CouponPackageSku.package_id == package_id,
+                CouponPackageSku.status == 0,
+            )
+        )
+        result = await self.db.execute(stmt)
+        return result.scalar() or 0

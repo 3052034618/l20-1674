@@ -150,6 +150,7 @@ async def test_validate_eligibility_success(
     test_activity: Activity,
     test_coupon_package: CouponPackage,
     test_user: User,
+    test_coupon_skus: list,
 ) -> None:
     request = ValidateCouponRequest(
         user_id=test_user.user_id,
@@ -164,7 +165,7 @@ async def test_validate_eligibility_success(
     assert result["eligible"] is True
     assert result["package_id"] == test_coupon_package.package_id
     assert result["package_name"] == test_coupon_package.name
-    assert result["remaining_stock"] == 100
+    assert result["remaining_stock"] == len(test_coupon_skus)
     assert result["valid_days"] == 30
 
 

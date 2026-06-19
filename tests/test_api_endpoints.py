@@ -189,6 +189,7 @@ async def test_validate_coupon_api_success(
     test_user: User,
     test_activity: Activity,
     test_coupon_package: CouponPackage,
+    test_coupon_skus: list,
 ):
     override_dependencies(db_session)
 
@@ -209,7 +210,7 @@ async def test_validate_coupon_api_success(
         assert data["code"] == 200
         assert data["user_message"] == "您可以领取该券包"
         assert data["data"]["eligible"] is True
-        assert data["data"]["remaining_stock"] == 100
+        assert data["data"]["remaining_stock"] == len(test_coupon_skus)
     finally:
         app.dependency_overrides.clear()
 

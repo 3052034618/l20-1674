@@ -12,6 +12,9 @@ class IssueCouponRequest(BaseModel):
     package_type: CouponType = Field(..., description="券包类型")
     trigger_scene: TriggerScene = Field(..., description="触发场景")
     request_id: str | None = Field(default=None, description="请求幂等ID", max_length=64)
+    external_user_id: str | None = Field(default=None, description="外部用户标识", max_length=128)
+    partner_id: str | None = Field(default=None, description="合作方/活动方标识", max_length=64)
+    biz_serial_no: str | None = Field(default=None, description="业务流水号", max_length=128)
 
     @field_validator("user_id", "activity_id")
     @classmethod

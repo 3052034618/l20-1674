@@ -57,6 +57,7 @@ def mock_redis() -> MagicMock:
     mock.expire = AsyncMock()
     mock.hgetall = AsyncMock(return_value={})
     mock.hset = AsyncMock()
+    mock.delete = AsyncMock()
     return mock
 
 
